@@ -12,18 +12,21 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/tg123/go-htpasswd"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/extension"
 	"go.opentelemetry.io/collector/extension/extensionauth"
+	"go.opentelemetry.io/collector/extension/extensioncapabilities"
 	"go.uber.org/zap"
 	creds "google.golang.org/grpc/credentials"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/basicauthextension/internal/awssecretsmanager"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/internal/basicauth"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/internal/credentialsfile"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/internal/secretprovider"
 )
 
 var (
@@ -38,7 +41,7 @@ func newClientAuthExtension(cfg *Config) *basicAuthClient {
 }
 
 func newServerAuthExtension(cfg *Config) (*basicAuthServer, error) {
-	if cfg.Htpasswd == nil || (cfg.Htpasswd.File == "" && cfg.Htpasswd.Inline == "" && cfg.Htpasswd.AWSSecret == nil) {
+	if cfg.Htpasswd == nil || (cfg.Htpasswd.File == "" && cfg.Htpasswd.Inline == "" && cfg.Htpasswd.SecretProvider == nil) {
 		return nil, errNoCredentialSource
 	}
 
@@ -48,8 +51,9 @@ func newServerAuthExtension(cfg *Config) (*basicAuthServer, error) {
 }
 
 var (
-	_ extension.Extension  = (*basicAuthServer)(nil)
-	_ extensionauth.Server = (*basicAuthServer)(nil)
+	_ extension.Extension            = (*basicAuthServer)(nil)
+	_ extensionauth.Server           = (*basicAuthServer)(nil)
+	_ extensioncapabilities.Dependent = (*basicAuthServer)(nil)
 )
 
 type htpasswdMatcher struct {
@@ -61,23 +65,39 @@ func (m *htpasswdMatcher) verify(username, password string) bool {
 }
 
 type basicAuthServer struct {
-	htpasswd          *HtpasswdSettings
-	matcher           atomic.Pointer[htpasswdMatcher]
-	awsSecretResolver *awssecretsmanager.Resolver
-	logger            *zap.Logger
+	htpasswd *HtpasswdSettings
+	matcher  atomic.Pointer[htpasswdMatcher]
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	logger   *zap.Logger
 }
 
-func (ba *basicAuthServer) Start(ctx context.Context, _ component.Host) error {
-	if ba.htpasswd.AWSSecret != nil {
-		cfg := ba.htpasswd.AWSSecret
-		processSecret := func(raw string) error {
-			return ba.parseAWSSecret(raw)
+func (ba *basicAuthServer) Start(ctx context.Context, host component.Host) error {
+	if ba.htpasswd.SecretProvider != nil {
+		cfg := ba.htpasswd.SecretProvider
+		ext, ok := host.GetExtensions()[cfg.ID]
+		if !ok {
+			return fmt.Errorf("secret provider extension %q not found", cfg.ID)
 		}
-		serverResolver := awssecretsmanager.NewResolver(cfg.SecretARN, cfg.Region, cfg.RefreshInterval, ba.logger, processSecret)
-		if err := serverResolver.Start(ctx); err != nil {
-			return err
+		sp, ok := ext.(secretprovider.SecretProvider)
+		if !ok {
+			return fmt.Errorf("extension %q does not implement SecretProvider", cfg.ID)
 		}
-		ba.awsSecretResolver = serverResolver
+
+		raw, err := sp.GetSecret(ctx)
+		if err != nil {
+			return fmt.Errorf("initial secret fetch from %q: %w", cfg.ID, err)
+		}
+		if err := ba.updateHtpasswd(raw); err != nil {
+			return fmt.Errorf("parse htpasswd from secret provider: %w", err)
+		}
+
+		if cfg.RefreshInterval > 0 {
+			rctx, cancel := context.WithCancel(context.Background())
+			ba.cancel = cancel
+			ba.wg.Add(1)
+			go ba.refreshLoop(rctx, sp, cfg.RefreshInterval)
+		}
 		return nil
 	}
 
@@ -108,8 +128,9 @@ func (ba *basicAuthServer) Start(ctx context.Context, _ component.Host) error {
 }
 
 func (ba *basicAuthServer) Shutdown(_ context.Context) error {
-	if ba.awsSecretResolver != nil {
-		return ba.awsSecretResolver.Shutdown()
+	if ba.cancel != nil {
+		ba.cancel()
+		ba.wg.Wait()
 	}
 	return nil
 }
@@ -122,40 +143,97 @@ func (ba *basicAuthServer) Authenticate(ctx context.Context, headers map[string]
 	return basicauth.Authenticate(ctx, headers, m.verify)
 }
 
-func (ba *basicAuthServer) parseAWSSecret(raw string) error {
+func (ba *basicAuthServer) Dependencies() []component.ID {
+	if ba.htpasswd != nil && ba.htpasswd.SecretProvider != nil {
+		return []component.ID{ba.htpasswd.SecretProvider.ID}
+	}
+	return nil
+}
+
+func (ba *basicAuthServer) updateHtpasswd(raw string) error {
 	htp, err := htpasswd.NewFromReader(strings.NewReader(raw), htpasswd.DefaultSystems, nil)
 	if err != nil {
 		return err
 	}
-	ba.matcher.CompareAndSwap(ba.matcher.Load(), &htpasswdMatcher{htp: htp})
+	ba.matcher.Store(&htpasswdMatcher{htp: htp})
 	return nil
 }
 
+func (ba *basicAuthServer) refreshLoop(ctx context.Context, sp secretprovider.SecretProvider, interval time.Duration) {
+	defer ba.wg.Done()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			raw, err := sp.GetSecret(ctx)
+			if err != nil {
+				ba.logger.Error("failed to refresh secret from provider", zap.Error(err))
+				continue
+			}
+			if err := ba.updateHtpasswd(raw); err != nil {
+				ba.logger.Error("failed to parse refreshed htpasswd content", zap.Error(err))
+				continue
+			}
+			ba.logger.Info("successfully refreshed htpasswd from secret provider")
+		}
+	}
+}
+
 var (
-	_ extension.Extension      = (*basicAuthClient)(nil)
-	_ extensionauth.HTTPClient = (*basicAuthClient)(nil)
-	_ extensionauth.GRPCClient = (*basicAuthClient)(nil)
+	_ extension.Extension            = (*basicAuthClient)(nil)
+	_ extensionauth.HTTPClient       = (*basicAuthClient)(nil)
+	_ extensionauth.GRPCClient       = (*basicAuthClient)(nil)
+	_ extensioncapabilities.Dependent = (*basicAuthClient)(nil)
 )
 
-type awsCredentials struct {
+type secretCredentials struct {
 	username string
 	password string
 }
 
 type basicAuthClient struct {
-	clientAuth        *ClientAuthSettings
-	logger            *zap.Logger
-	usernameResolver  credentialsfile.ValueResolver
-	passwordResolver  credentialsfile.ValueResolver
-	awsSecretResolver *awssecretsmanager.Resolver
-	creds             atomic.Pointer[awsCredentials]
+	clientAuth       *ClientAuthSettings
+	logger           *zap.Logger
+	usernameResolver credentialsfile.ValueResolver
+	passwordResolver credentialsfile.ValueResolver
+	creds            atomic.Pointer[secretCredentials]
+	cancel           context.CancelFunc
+	wg               sync.WaitGroup
 }
 
-func (ba *basicAuthClient) Start(ctx context.Context, _ component.Host) error {
+func (ba *basicAuthClient) Start(ctx context.Context, host component.Host) error {
 	if ba.clientAuth == nil {
 		return errNoCredentialSource
 	}
 	ca := ba.clientAuth
+
+	if ca.SecretProvider != nil {
+		cfg := ca.SecretProvider
+		ext, ok := host.GetExtensions()[cfg.ID]
+		if !ok {
+			return fmt.Errorf("secret provider extension %q not found", cfg.ID)
+		}
+		sp, ok := ext.(secretprovider.SecretProvider)
+		if !ok {
+			return fmt.Errorf("extension %q does not implement SecretProvider", cfg.ID)
+		}
+
+		if err := ba.refreshFromSecretProvider(ctx, sp, cfg); err != nil {
+			return fmt.Errorf("initial secret fetch from %q: %w", cfg.ID, err)
+		}
+
+		if cfg.RefreshInterval > 0 {
+			rctx, cancel := context.WithCancel(context.Background())
+			ba.cancel = cancel
+			ba.wg.Add(1)
+			go ba.clientRefreshLoop(rctx, sp, cfg)
+		}
+		return nil
+	}
+
 	if ca.Username != "" || ca.UsernameFile != "" {
 		r, err := credentialsfile.NewValueResolver(ca.Username, ca.UsernameFile, ba.logger)
 		if err != nil {
@@ -177,18 +255,6 @@ func (ba *basicAuthClient) Start(ctx context.Context, _ component.Host) error {
 		ba.passwordResolver = r
 	}
 
-	if ca.AWSSecret != nil {
-		cfg := ca.AWSSecret
-		processSecret := func(raw string) error {
-			return ba.parseAWSSecret(raw)
-		}
-		clientResolver := awssecretsmanager.NewResolver(cfg.SecretARN, cfg.Region, cfg.RefreshInterval, ba.logger, processSecret)
-		if err := clientResolver.Start(ctx); err != nil {
-			return fmt.Errorf("start AWS secret resolver: %w", err)
-		}
-		ba.awsSecretResolver = clientResolver
-	}
-
 	return nil
 }
 
@@ -200,8 +266,9 @@ func (ba *basicAuthClient) Shutdown(_ context.Context) error {
 	if ba.passwordResolver != nil {
 		errs = append(errs, ba.passwordResolver.Shutdown())
 	}
-	if ba.awsSecretResolver != nil {
-		errs = append(errs, ba.awsSecretResolver.Shutdown())
+	if ba.cancel != nil {
+		ba.cancel()
+		ba.wg.Wait()
 	}
 	return errors.Join(errs...)
 }
@@ -232,8 +299,18 @@ func (ba *basicAuthClient) Password() string {
 	return ""
 }
 
-func (ba *basicAuthClient) parseAWSSecret(raw string) error {
-	cfg := ba.clientAuth.AWSSecret
+func (ba *basicAuthClient) Dependencies() []component.ID {
+	if ba.clientAuth != nil && ba.clientAuth.SecretProvider != nil {
+		return []component.ID{ba.clientAuth.SecretProvider.ID}
+	}
+	return nil
+}
+
+func (ba *basicAuthClient) refreshFromSecretProvider(ctx context.Context, sp secretprovider.SecretProvider, cfg *SecretProviderConfig) error {
+	raw, err := sp.GetSecret(ctx)
+	if err != nil {
+		return fmt.Errorf("get secret: %w", err)
+	}
 	var parsed map[string]any
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
 		return fmt.Errorf("parse secret as JSON: %w", err)
@@ -254,8 +331,26 @@ func (ba *basicAuthClient) parseAWSSecret(raw string) error {
 	if !ok {
 		return fmt.Errorf("key %q in secret is not a string", cfg.PasswordKey)
 	}
-	ba.creds.CompareAndSwap(ba.creds.Load(), &awsCredentials{username: u, password: p})
+	ba.creds.Store(&secretCredentials{username: u, password: p})
 	return nil
+}
+
+func (ba *basicAuthClient) clientRefreshLoop(ctx context.Context, sp secretprovider.SecretProvider, cfg *SecretProviderConfig) {
+	defer ba.wg.Done()
+	ticker := time.NewTicker(cfg.RefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := ba.refreshFromSecretProvider(ctx, sp, cfg); err != nil {
+				ba.logger.Error("failed to refresh credentials from secret provider", zap.Error(err))
+				continue
+			}
+			ba.logger.Info("successfully refreshed credentials from secret provider")
+		}
+	}
 }
 
 func (ba *basicAuthClient) RoundTripper(base http.RoundTripper) (http.RoundTripper, error) {

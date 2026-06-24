@@ -7,36 +7,31 @@ import (
 	"errors"
 	"time"
 
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/configopaque"
 )
 
 var (
-	errNoCredentialSource        = errors.New("no credential source provided")
-	errMultipleAuthenticators    = errors.New("only one of `htpasswd` or `client_auth` can be specified")
-	errAWSSecretAndOtherSource   = errors.New("only one credential source allowed: choose `aws_secret` or inline/file, not both")
-	errAWSSecretMissingARN       = errors.New("`aws_secret.secret_arn` is required")
-	errAWSSecretMissingRegion    = errors.New("`aws_secret.region` is required")
-	errAWSSecretMissingKeys      = errors.New("`aws_secret.username_key` and `aws_secret.password_key` are required for client_auth")
-	errAWSSecretNegativeInterval = errors.New("`aws_secret.refresh_interval` must not be negative")
+	errNoCredentialSource              = errors.New("no credential source provided")
+	errMultipleAuthenticators          = errors.New("only one of `htpasswd` or `client_auth` can be specified")
+	errSecretProviderAndOtherSource    = errors.New("only one credential source allowed: choose `secret_provider` or inline/file, not both")
+	errSecretProviderMissingID         = errors.New("`secret_provider.id` is required")
+	errSecretProviderMissingKeys       = errors.New("`secret_provider.username_key` and `secret_provider.password_key` are required for client_auth")
+	errSecretProviderNegativeInterval  = errors.New("`secret_provider.refresh_interval` must not be negative")
 )
 
-
-// AWSSecretClientConfig configures AWS Secrets Manager as a credential source for client auth.
-// The secret must be a JSON object containing fields for username and password.
-type AWSSecretClientConfig struct {
-	SecretARN       string        `mapstructure:"secret_arn"`
-	Region          string        `mapstructure:"region"`
-	UsernameKey     string        `mapstructure:"username_key"`
-	PasswordKey     string        `mapstructure:"password_key"`
-	RefreshInterval time.Duration `mapstructure:"refresh_interval"`
-}
-
-// AWSSecretHtpasswdConfig configures AWS Secrets Manager as a credential source for server auth.
-// The secret value is used directly as htpasswd content.
-type AWSSecretHtpasswdConfig struct {
-	SecretARN       string        `mapstructure:"secret_arn"`
-	Region          string        `mapstructure:"region"`
-	RefreshInterval time.Duration `mapstructure:"refresh_interval"`
+// SecretProviderConfig references an external secret-providing extension by component ID.
+// The referenced extension must implement the SecretProvider interface.
+type SecretProviderConfig struct {
+	// ID is the component ID of the secret provider extension.
+	ID component.ID `mapstructure:"id"`
+	// UsernameKey is the JSON key for the username in the secret value (client_auth only).
+	UsernameKey string `mapstructure:"username_key,omitempty"`
+	// PasswordKey is the JSON key for the password in the secret value (client_auth only).
+	PasswordKey string `mapstructure:"password_key,omitempty"`
+	// RefreshInterval controls how often basicauth re-reads the secret from the provider.
+	// A zero value means no periodic refresh (fetch once at startup).
+	RefreshInterval time.Duration `mapstructure:"refresh_interval,omitempty"`
 }
 
 type HtpasswdSettings struct {
@@ -44,8 +39,8 @@ type HtpasswdSettings struct {
 	File string `mapstructure:"file"`
 	// Inline contents of the htpasswd file.
 	Inline string `mapstructure:"inline"`
-	// AWSSecret configures AWS Secrets Manager as the htpasswd source.
-	AWSSecret *AWSSecretHtpasswdConfig `mapstructure:"aws_secret,omitempty"`
+	// SecretProvider references an external extension that supplies the htpasswd content.
+	SecretProvider *SecretProviderConfig `mapstructure:"secret_provider,omitempty"`
 	// prevent unkeyed literal initialization
 	_ struct{}
 }
@@ -61,8 +56,8 @@ type ClientAuthSettings struct {
 	// PasswordFile points to a file that contains the password.
 	// If set, takes precedence over Password. The file is watched for changes.
 	PasswordFile string `mapstructure:"password_file"`
-	// AWSSecret configures AWS Secrets Manager as the credential source.
-	AWSSecret *AWSSecretClientConfig `mapstructure:"aws_secret,omitempty"`
+	// SecretProvider references an external extension that supplies credentials as a JSON secret.
+	SecretProvider *SecretProviderConfig `mapstructure:"secret_provider,omitempty"`
 	// prevent unkeyed literal initialization
 	_ struct{}
 }
@@ -105,50 +100,34 @@ func (cfg *Config) Validate() error {
 }
 
 func (c *ClientAuthSettings) validate() error {
-	if c.AWSSecret != nil {
+	if c.SecretProvider != nil {
 		if c.Username != "" || c.UsernameFile != "" || string(c.Password) != "" || c.PasswordFile != "" {
-			return errAWSSecretAndOtherSource
+			return errSecretProviderAndOtherSource
 		}
-		return c.AWSSecret.validate()
+		return c.SecretProvider.validate(true)
 	}
 	return nil
 }
 
 func (h *HtpasswdSettings) validate() error {
-	if h.AWSSecret != nil {
+	if h.SecretProvider != nil {
 		if h.File != "" || h.Inline != "" {
-			return errAWSSecretAndOtherSource
+			return errSecretProviderAndOtherSource
 		}
-		return h.AWSSecret.validate()
+		return h.SecretProvider.validate(false)
 	}
 	return nil
 }
 
-func (c *AWSSecretClientConfig) validate() error {
-	if c.SecretARN == "" {
-		return errAWSSecretMissingARN
+func (c *SecretProviderConfig) validate(clientMode bool) error {
+	if c.ID == (component.ID{}) {
+		return errSecretProviderMissingID
 	}
-	if c.Region == "" {
-		return errAWSSecretMissingRegion
-	}
-	if c.UsernameKey == "" || c.PasswordKey == "" {
-		return errAWSSecretMissingKeys
+	if clientMode && (c.UsernameKey == "" || c.PasswordKey == "") {
+		return errSecretProviderMissingKeys
 	}
 	if c.RefreshInterval < 0 {
-		return errAWSSecretNegativeInterval
-	}
-	return nil
-}
-
-func (c *AWSSecretHtpasswdConfig) validate() error {
-	if c.SecretARN == "" {
-		return errAWSSecretMissingARN
-	}
-	if c.Region == "" {
-		return errAWSSecretMissingRegion
-	}
-	if c.RefreshInterval < 0 {
-		return errAWSSecretNegativeInterval
+		return errSecretProviderNegativeInterval
 	}
 	return nil
 }

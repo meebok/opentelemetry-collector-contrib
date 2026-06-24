@@ -3,11 +3,9 @@ module github.com/open-telemetry/opentelemetry-collector-contrib/extension/basic
 go 1.25.0
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.41.12
-	github.com/aws/aws-sdk-go-v2/config v1.32.23
-	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.42.2
 	github.com/open-telemetry/opentelemetry-collector-contrib/extension/internal/basicauth v0.155.0
 	github.com/open-telemetry/opentelemetry-collector-contrib/extension/internal/credentialsfile v0.155.0
+	github.com/open-telemetry/opentelemetry-collector-contrib/extension/internal/secretprovider v0.155.0
 	github.com/stretchr/testify v1.11.1
 	github.com/tg123/go-htpasswd v1.2.5
 	go.opentelemetry.io/collector/client v1.61.0
@@ -18,6 +16,7 @@ require (
 	go.opentelemetry.io/collector/confmap/xconfmap v0.155.0
 	go.opentelemetry.io/collector/extension v1.61.0
 	go.opentelemetry.io/collector/extension/extensionauth v1.61.0
+	go.opentelemetry.io/collector/extension/extensioncapabilities v0.155.0
 	go.opentelemetry.io/collector/extension/extensiontest v0.155.0
 	go.uber.org/goleak v1.3.0
 	go.uber.org/zap v1.28.0
@@ -26,18 +25,6 @@ require (
 
 require (
 	github.com/GehirnInc/crypt v0.0.0-20230320061759-8cc1b52080c5 // indirect
-	github.com/aws/aws-sdk-go-v2/credentials v1.19.22 // indirect
-	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.28 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.28 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.28 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.29 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.12 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.28 // indirect
-	github.com/aws/aws-sdk-go-v2/service/signin v1.1.4 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sso v1.31.2 // indirect
-	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.36.5 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sts v1.43.2 // indirect
-	github.com/aws/smithy-go v1.27.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
@@ -67,7 +54,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/crypto v0.52.0 // indirect
+	golang.org/x/crypto v0.45.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
@@ -82,3 +69,5 @@ retract (
 replace github.com/open-telemetry/opentelemetry-collector-contrib/extension/internal/basicauth => ../internal/basicauth
 
 replace github.com/open-telemetry/opentelemetry-collector-contrib/extension/internal/credentialsfile => ../internal/credentialsfile
+
+replace github.com/open-telemetry/opentelemetry-collector-contrib/extension/internal/secretprovider => ../internal/secretprovider

@@ -18,18 +18,16 @@ basicauth/both:
   htpasswd:
     file: /etc/nginx/htpasswd
 
-basicauth/client_aws:
+basicauth/client_secret_provider:
   client_auth:
-    aws_secret:
-      secret_arn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:my-creds"
-      region: "us-east-1"
+    secret_provider:
+      id: "awssecretsmanagerprovider"
       username_key: "username"
       password_key: "password"
       refresh_interval: 5m
 
-basicauth/server_aws:
+basicauth/server_secret_provider:
   htpasswd:
-    aws_secret:
-      secret_arn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:my-htpasswd"
-      region: "us-east-1"
+    secret_provider:
+      id: "awssecretsmanagerprovider"
       refresh_interval: 10m

@@ -51,12 +51,11 @@ func TestLoadConfig(t *testing.T) {
 			expectedErr: true,
 		},
 		{
-			id: component.NewIDWithName(metadata.Type, "client_aws"),
+			id: component.NewIDWithName(metadata.Type, "client_secret_provider"),
 			expected: &Config{
 				ClientAuth: &ClientAuthSettings{
-					AWSSecret: &AWSSecretClientConfig{
-						SecretARN:       "arn:aws:secretsmanager:us-east-1:123456789012:secret:my-creds",
-						Region:          "us-east-1",
+					SecretProvider: &SecretProviderConfig{
+						ID:              component.MustNewID("awssecretsmanagerprovider"),
 						UsernameKey:     "username",
 						PasswordKey:     "password",
 						RefreshInterval: 5 * time.Minute,
@@ -65,12 +64,11 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
-			id: component.NewIDWithName(metadata.Type, "server_aws"),
+			id: component.NewIDWithName(metadata.Type, "server_secret_provider"),
 			expected: &Config{
 				Htpasswd: &HtpasswdSettings{
-					AWSSecret: &AWSSecretHtpasswdConfig{
-						SecretARN:       "arn:aws:secretsmanager:us-east-1:123456789012:secret:my-htpasswd",
-						Region:          "us-east-1",
+					SecretProvider: &SecretProviderConfig{
+						ID:              component.MustNewID("awssecretsmanagerprovider"),
 						RefreshInterval: 10 * time.Minute,
 					},
 				},
@@ -96,7 +94,7 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
-func TestValidate_AWSSecretMutualExclusion(t *testing.T) {
+func TestValidate_SecretProviderMutualExclusion(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -105,111 +103,99 @@ func TestValidate_AWSSecretMutualExclusion(t *testing.T) {
 		err  error
 	}{
 		{
-			name: "client_aws_with_inline",
+			name: "client_secret_provider_with_inline",
 			cfg: &Config{
 				ClientAuth: &ClientAuthSettings{
 					Username: "user",
-					AWSSecret: &AWSSecretClientConfig{
-						SecretARN: "arn", Region: "us-east-1",
+					SecretProvider: &SecretProviderConfig{
+						ID:          component.MustNewID("provider"),
 						UsernameKey: "u", PasswordKey: "p",
 					},
 				},
 			},
-			err: errAWSSecretAndOtherSource,
+			err: errSecretProviderAndOtherSource,
 		},
 		{
-			name: "client_aws_with_file",
+			name: "client_secret_provider_with_file",
 			cfg: &Config{
 				ClientAuth: &ClientAuthSettings{
 					PasswordFile: "/path",
-					AWSSecret: &AWSSecretClientConfig{
-						SecretARN: "arn", Region: "us-east-1",
+					SecretProvider: &SecretProviderConfig{
+						ID:          component.MustNewID("provider"),
 						UsernameKey: "u", PasswordKey: "p",
 					},
 				},
 			},
-			err: errAWSSecretAndOtherSource,
+			err: errSecretProviderAndOtherSource,
 		},
 		{
-			name: "server_aws_with_file",
+			name: "server_secret_provider_with_file",
 			cfg: &Config{
 				Htpasswd: &HtpasswdSettings{
 					File: "/path",
-					AWSSecret: &AWSSecretHtpasswdConfig{
-						SecretARN: "arn", Region: "us-east-1",
+					SecretProvider: &SecretProviderConfig{
+						ID: component.MustNewID("provider"),
 					},
 				},
 			},
-			err: errAWSSecretAndOtherSource,
+			err: errSecretProviderAndOtherSource,
 		},
 		{
-			name: "server_aws_with_inline",
+			name: "server_secret_provider_with_inline",
 			cfg: &Config{
 				Htpasswd: &HtpasswdSettings{
 					Inline: "user:pass",
-					AWSSecret: &AWSSecretHtpasswdConfig{
-						SecretARN: "arn", Region: "us-east-1",
+					SecretProvider: &SecretProviderConfig{
+						ID: component.MustNewID("provider"),
 					},
 				},
 			},
-			err: errAWSSecretAndOtherSource,
+			err: errSecretProviderAndOtherSource,
 		},
 		{
-			name: "client_aws_missing_arn",
+			name: "client_secret_provider_missing_id",
 			cfg: &Config{
 				ClientAuth: &ClientAuthSettings{
-					AWSSecret: &AWSSecretClientConfig{
-						Region: "us-east-1", UsernameKey: "u", PasswordKey: "p",
-					},
-				},
-			},
-			err: errAWSSecretMissingARN,
-		},
-		{
-			name: "client_aws_missing_region",
-			cfg: &Config{
-				ClientAuth: &ClientAuthSettings{
-					AWSSecret: &AWSSecretClientConfig{
-						SecretARN: "arn", UsernameKey: "u", PasswordKey: "p",
-					},
-				},
-			},
-			err: errAWSSecretMissingRegion,
-		},
-		{
-			name: "client_aws_missing_keys",
-			cfg: &Config{
-				ClientAuth: &ClientAuthSettings{
-					AWSSecret: &AWSSecretClientConfig{
-						SecretARN: "arn", Region: "us-east-1",
-					},
-				},
-			},
-			err: errAWSSecretMissingKeys,
-		},
-		{
-			name: "client_aws_negative_interval",
-			cfg: &Config{
-				ClientAuth: &ClientAuthSettings{
-					AWSSecret: &AWSSecretClientConfig{
-						SecretARN: "arn", Region: "us-east-1",
+					SecretProvider: &SecretProviderConfig{
 						UsernameKey: "u", PasswordKey: "p",
+					},
+				},
+			},
+			err: errSecretProviderMissingID,
+		},
+		{
+			name: "client_secret_provider_missing_keys",
+			cfg: &Config{
+				ClientAuth: &ClientAuthSettings{
+					SecretProvider: &SecretProviderConfig{
+						ID: component.MustNewID("provider"),
+					},
+				},
+			},
+			err: errSecretProviderMissingKeys,
+		},
+		{
+			name: "client_secret_provider_negative_interval",
+			cfg: &Config{
+				ClientAuth: &ClientAuthSettings{
+					SecretProvider: &SecretProviderConfig{
+						ID:              component.MustNewID("provider"),
+						UsernameKey:     "u",
+						PasswordKey:     "p",
 						RefreshInterval: -1 * time.Second,
 					},
 				},
 			},
-			err: errAWSSecretNegativeInterval,
+			err: errSecretProviderNegativeInterval,
 		},
 		{
-			name: "server_aws_missing_arn",
+			name: "server_secret_provider_missing_id",
 			cfg: &Config{
 				Htpasswd: &HtpasswdSettings{
-					AWSSecret: &AWSSecretHtpasswdConfig{
-						Region: "us-east-1",
-					},
+					SecretProvider: &SecretProviderConfig{},
 				},
 			},
-			err: errAWSSecretMissingARN,
+			err: errSecretProviderMissingID,
 		},
 	}
 	for _, tt := range tests {

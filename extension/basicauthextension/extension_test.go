@@ -13,20 +13,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
-	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tg123/go-htpasswd"
 	"go.opentelemetry.io/collector/client"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.uber.org/zap/zaptest"
-
-	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/basicauthextension/internal/awssecretsmanager"
 )
 
 var credentials = [][]string{
@@ -311,62 +306,65 @@ func TestBasicAuth_ClientInvalid(t *testing.T) {
 	})
 }
 
-type mockSMClient struct {
-	secretString atomic.Pointer[string]
-	err          error
+// mockSecretProvider implements secretprovider.SecretProvider for testing.
+type mockSecretProvider struct {
+	secret atomic.Pointer[string]
 }
 
-func (m *mockSMClient) GetSecretValue(_ context.Context, _ *secretsmanager.GetSecretValueInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
-	if m.err != nil {
-		return nil, m.err
+func (m *mockSecretProvider) GetSecret(_ context.Context) (string, error) {
+	s := m.secret.Load()
+	if s == nil {
+		return "", fmt.Errorf("no secret configured")
 	}
-	s := m.secretString.Load()
-	return &secretsmanager.GetSecretValueOutput{
-		SecretString: s,
-	}, nil
+	return *s, nil
 }
 
-func (m *mockSMClient) setSecret(s string) {
-	m.secretString.Store(&s)
+func (m *mockSecretProvider) setSecret(s string) {
+	m.secret.Store(&s)
 }
 
-func TestClientAuth_AWSSecret(t *testing.T) {
+// mockHost wraps componenttest.NewNopHost() and adds custom extensions.
+type mockHost struct {
+	component.Host
+	extensions map[component.ID]component.Component
+}
+
+func (h *mockHost) GetExtensions() map[component.ID]component.Component {
+	return h.extensions
+}
+
+func newMockHost(exts map[component.ID]component.Component) *mockHost {
+	return &mockHost{
+		Host:       componenttest.NewNopHost(),
+		extensions: exts,
+	}
+}
+
+func TestClientAuth_SecretProvider(t *testing.T) {
 	t.Parallel()
 	secret := map[string]string{"user": "admin", "pass": "secret123"}
 	data, _ := json.Marshal(secret)
 
-	mock := &mockSMClient{}
+	mock := &mockSecretProvider{}
 	mock.setSecret(string(data))
+
+	providerID := component.MustNewID("testprovider")
+	host := newMockHost(map[component.ID]component.Component{
+		providerID: nopExtensionWithSecretProvider{mock},
+	})
 
 	ext := &basicAuthClient{
 		clientAuth: &ClientAuthSettings{
-			AWSSecret: &AWSSecretClientConfig{
-				SecretARN:       "arn:aws:secretsmanager:us-east-1:123:secret:test",
-				Region:          "us-east-1",
-				UsernameKey:     "user",
-				PasswordKey:     "pass",
-				RefreshInterval: 5 * time.Minute,
+			SecretProvider: &SecretProviderConfig{
+				ID:          providerID,
+				UsernameKey: "user",
+				PasswordKey: "pass",
 			},
 		},
 		logger: zaptest.NewLogger(t),
 	}
 
-	cfg := ext.clientAuth.AWSSecret
-	cr := awssecretsmanager.NewResolver(cfg.SecretARN, cfg.Region, cfg.RefreshInterval, ext.logger,
-		func(raw string) error {
-			var parsed map[string]any
-			if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-				return err
-			}
-			u := parsed[cfg.UsernameKey].(string)
-			p := parsed[cfg.PasswordKey].(string)
-			ext.creds.CompareAndSwap(ext.creds.Load(), &awsCredentials{username: u, password: p})
-			return nil
-		},
-	)
-	cr.Client = mock
-	require.NoError(t, cr.Start(t.Context()))
-	ext.awsSecretResolver = cr
+	require.NoError(t, ext.Start(t.Context(), host))
 	defer func() { require.NoError(t, ext.Shutdown(t.Context())) }()
 
 	assert.Equal(t, "admin", ext.Username())
@@ -380,38 +378,27 @@ func TestClientAuth_AWSSecret(t *testing.T) {
 	assert.Contains(t, resp.Header.Get("Authorization"), "Basic ")
 }
 
-func TestServerAuth_AWSSecret(t *testing.T) {
+func TestServerAuth_SecretProvider(t *testing.T) {
 	t.Parallel()
 
-	mock := &mockSMClient{}
+	mock := &mockSecretProvider{}
 	mock.setSecret("testuser:{SHA}W6ph5Mm5Pz8GgiULbPgzG37mj9g=")
+
+	providerID := component.MustNewID("testprovider")
+	host := newMockHost(map[component.ID]component.Component{
+		providerID: nopExtensionWithSecretProvider{mock},
+	})
 
 	ext := &basicAuthServer{
 		htpasswd: &HtpasswdSettings{
-			AWSSecret: &AWSSecretHtpasswdConfig{
-				SecretARN:       "arn:aws:secretsmanager:us-east-1:123:secret:test",
-				Region:          "us-east-1",
-				RefreshInterval: 5 * time.Minute,
+			SecretProvider: &SecretProviderConfig{
+				ID: providerID,
 			},
 		},
 		logger: zaptest.NewLogger(t),
 	}
 
-	resolver := awssecretsmanager.NewResolver(
-		ext.htpasswd.AWSSecret.SecretARN, ext.htpasswd.AWSSecret.Region,
-		ext.htpasswd.AWSSecret.RefreshInterval, ext.logger,
-		func(raw string) error {
-			htp, err := htpasswd.NewFromReader(strings.NewReader(raw), htpasswd.DefaultSystems, nil)
-			if err != nil {
-				return err
-			}
-			ext.matcher.Store(&htpasswdMatcher{htp: htp})
-			return nil
-		},
-	)
-	resolver.Client = mock
-	require.NoError(t, resolver.Start(t.Context()))
-	ext.awsSecretResolver = resolver
+	require.NoError(t, ext.Start(t.Context(), host))
 	defer func() { require.NoError(t, ext.Shutdown(t.Context())) }()
 
 	auth := "dGVzdHVzZXI6cGFzc3dvcmQ=" // testuser:password
@@ -419,3 +406,88 @@ func TestServerAuth_AWSSecret(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, ctx)
 }
+
+func TestSecretProvider_ExtensionNotFound(t *testing.T) {
+	t.Parallel()
+	host := newMockHost(map[component.ID]component.Component{})
+
+	ext := &basicAuthServer{
+		htpasswd: &HtpasswdSettings{
+			SecretProvider: &SecretProviderConfig{
+				ID: component.MustNewID("nonexistent"),
+			},
+		},
+		logger: zaptest.NewLogger(t),
+	}
+
+	err := ext.Start(t.Context(), host)
+	assert.ErrorContains(t, err, "not found")
+}
+
+func TestSecretProvider_ExtensionNotImplemented(t *testing.T) {
+	t.Parallel()
+	providerID := component.MustNewID("notaprovider")
+	host := newMockHost(map[component.ID]component.Component{
+		providerID: nopExtension{},
+	})
+
+	ext := &basicAuthServer{
+		htpasswd: &HtpasswdSettings{
+			SecretProvider: &SecretProviderConfig{
+				ID: providerID,
+			},
+		},
+		logger: zaptest.NewLogger(t),
+	}
+
+	err := ext.Start(t.Context(), host)
+	assert.ErrorContains(t, err, "does not implement SecretProvider")
+}
+
+func TestDependencies_Server(t *testing.T) {
+	t.Parallel()
+	providerID := component.MustNewID("myprovider")
+
+	ext := &basicAuthServer{
+		htpasswd: &HtpasswdSettings{
+			SecretProvider: &SecretProviderConfig{ID: providerID},
+		},
+	}
+	assert.Equal(t, []component.ID{providerID}, ext.Dependencies())
+
+	extNoProvider := &basicAuthServer{
+		htpasswd: &HtpasswdSettings{Inline: "user:pass"},
+	}
+	assert.Nil(t, extNoProvider.Dependencies())
+}
+
+func TestDependencies_Client(t *testing.T) {
+	t.Parallel()
+	providerID := component.MustNewID("myprovider")
+
+	ext := &basicAuthClient{
+		clientAuth: &ClientAuthSettings{
+			SecretProvider: &SecretProviderConfig{ID: providerID, UsernameKey: "u", PasswordKey: "p"},
+		},
+	}
+	assert.Equal(t, []component.ID{providerID}, ext.Dependencies())
+
+	extNoProvider := &basicAuthClient{
+		clientAuth: &ClientAuthSettings{Username: "user", Password: "pass"},
+	}
+	assert.Nil(t, extNoProvider.Dependencies())
+}
+
+// nopExtension is a minimal extension that doesn't implement SecretProvider.
+type nopExtension struct{}
+
+func (nopExtension) Start(context.Context, component.Host) error { return nil }
+func (nopExtension) Shutdown(context.Context) error              { return nil }
+
+// nopExtensionWithSecretProvider wraps a mockSecretProvider as a component.Component.
+type nopExtensionWithSecretProvider struct {
+	*mockSecretProvider
+}
+
+func (nopExtensionWithSecretProvider) Start(context.Context, component.Host) error { return nil }
+func (nopExtensionWithSecretProvider) Shutdown(context.Context) error              { return nil }
