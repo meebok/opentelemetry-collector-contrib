@@ -308,7 +308,8 @@ func TestBasicAuth_ClientInvalid(t *testing.T) {
 
 // mockSecretProvider implements secretprovider.SecretProvider for testing.
 type mockSecretProvider struct {
-	secret atomic.Pointer[string]
+	secret   atomic.Pointer[string]
+	onChange func(string)
 }
 
 func (m *mockSecretProvider) GetSecret(_ context.Context) (string, error) {
@@ -319,8 +320,19 @@ func (m *mockSecretProvider) GetSecret(_ context.Context) (string, error) {
 	return *s, nil
 }
 
+func (m *mockSecretProvider) OnChange(fn func(string)) {
+	m.onChange = fn
+}
+
 func (m *mockSecretProvider) setSecret(s string) {
 	m.secret.Store(&s)
+}
+
+func (m *mockSecretProvider) simulateRotation(s string) {
+	m.secret.Store(&s)
+	if m.onChange != nil {
+		m.onChange(s)
+	}
 }
 
 // mockHost wraps componenttest.NewNopHost() and adds custom extensions.

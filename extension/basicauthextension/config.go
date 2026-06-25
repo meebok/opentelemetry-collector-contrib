@@ -5,7 +5,6 @@ package basicauthextension // import "github.com/open-telemetry/opentelemetry-co
 
 import (
 	"errors"
-	"time"
 
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/configopaque"
@@ -17,7 +16,6 @@ var (
 	errSecretProviderAndOtherSource    = errors.New("only one credential source allowed: choose `secret_provider` or inline/file, not both")
 	errSecretProviderMissingID         = errors.New("`secret_provider.id` is required")
 	errSecretProviderMissingKeys       = errors.New("`secret_provider.username_key` and `secret_provider.password_key` are required for client_auth")
-	errSecretProviderNegativeInterval  = errors.New("`secret_provider.refresh_interval` must not be negative")
 )
 
 // SecretProviderConfig references an external secret-providing extension by component ID.
@@ -29,9 +27,6 @@ type SecretProviderConfig struct {
 	UsernameKey string `mapstructure:"username_key,omitempty"`
 	// PasswordKey is the JSON key for the password in the secret value (client_auth only).
 	PasswordKey string `mapstructure:"password_key,omitempty"`
-	// RefreshInterval controls how often basicauth re-reads the secret from the provider.
-	// A zero value means no periodic refresh (fetch once at startup).
-	RefreshInterval time.Duration `mapstructure:"refresh_interval,omitempty"`
 }
 
 type HtpasswdSettings struct {
@@ -125,9 +120,6 @@ func (c *SecretProviderConfig) validate(clientMode bool) error {
 	}
 	if clientMode && (c.UsernameKey == "" || c.PasswordKey == "") {
 		return errSecretProviderMissingKeys
-	}
-	if c.RefreshInterval < 0 {
-		return errSecretProviderNegativeInterval
 	}
 	return nil
 }

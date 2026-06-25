@@ -24,10 +24,8 @@ basicauth/client_secret_provider:
       id: "awssecretsmanagerprovider"
       username_key: "username"
       password_key: "password"
-      refresh_interval: 5m
 
 basicauth/server_secret_provider:
   htpasswd:
     secret_provider:
       id: "awssecretsmanagerprovider"
-      refresh_interval: 10m

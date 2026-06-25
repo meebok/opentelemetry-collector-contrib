@@ -12,9 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/tg123/go-htpasswd"
 	"go.opentelemetry.io/collector/component"
@@ -67,8 +65,6 @@ func (m *htpasswdMatcher) verify(username, password string) bool {
 type basicAuthServer struct {
 	htpasswd *HtpasswdSettings
 	matcher  atomic.Pointer[htpasswdMatcher]
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
 	logger   *zap.Logger
 }
 
@@ -92,12 +88,13 @@ func (ba *basicAuthServer) Start(ctx context.Context, host component.Host) error
 			return fmt.Errorf("parse htpasswd from secret provider: %w", err)
 		}
 
-		if cfg.RefreshInterval > 0 {
-			rctx, cancel := context.WithCancel(context.Background())
-			ba.cancel = cancel
-			ba.wg.Add(1)
-			go ba.refreshLoop(rctx, sp, cfg.RefreshInterval)
-		}
+		sp.OnChange(func(newValue string) {
+			if err := ba.updateHtpasswd(newValue); err != nil {
+				ba.logger.Error("failed to parse refreshed htpasswd content", zap.Error(err))
+				return
+			}
+			ba.logger.Info("htpasswd updated from secret provider")
+		})
 		return nil
 	}
 
@@ -128,10 +125,6 @@ func (ba *basicAuthServer) Start(ctx context.Context, host component.Host) error
 }
 
 func (ba *basicAuthServer) Shutdown(_ context.Context) error {
-	if ba.cancel != nil {
-		ba.cancel()
-		ba.wg.Wait()
-	}
 	return nil
 }
 
@@ -159,29 +152,6 @@ func (ba *basicAuthServer) updateHtpasswd(raw string) error {
 	return nil
 }
 
-func (ba *basicAuthServer) refreshLoop(ctx context.Context, sp secretprovider.SecretProvider, interval time.Duration) {
-	defer ba.wg.Done()
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			raw, err := sp.GetSecret(ctx)
-			if err != nil {
-				ba.logger.Error("failed to refresh secret from provider", zap.Error(err))
-				continue
-			}
-			if err := ba.updateHtpasswd(raw); err != nil {
-				ba.logger.Error("failed to parse refreshed htpasswd content", zap.Error(err))
-				continue
-			}
-			ba.logger.Info("successfully refreshed htpasswd from secret provider")
-		}
-	}
-}
-
 var (
 	_ extension.Extension            = (*basicAuthClient)(nil)
 	_ extensionauth.HTTPClient       = (*basicAuthClient)(nil)
@@ -200,8 +170,6 @@ type basicAuthClient struct {
 	usernameResolver credentialsfile.ValueResolver
 	passwordResolver credentialsfile.ValueResolver
 	creds            atomic.Pointer[secretCredentials]
-	cancel           context.CancelFunc
-	wg               sync.WaitGroup
 }
 
 func (ba *basicAuthClient) Start(ctx context.Context, host component.Host) error {
@@ -225,12 +193,13 @@ func (ba *basicAuthClient) Start(ctx context.Context, host component.Host) error
 			return fmt.Errorf("initial secret fetch from %q: %w", cfg.ID, err)
 		}
 
-		if cfg.RefreshInterval > 0 {
-			rctx, cancel := context.WithCancel(context.Background())
-			ba.cancel = cancel
-			ba.wg.Add(1)
-			go ba.clientRefreshLoop(rctx, sp, cfg)
-		}
+		sp.OnChange(func(newValue string) {
+			if err := ba.parseAndStoreCredentials(newValue, cfg); err != nil {
+				ba.logger.Error("failed to parse credentials from secret", zap.Error(err))
+				return
+			}
+			ba.logger.Info("credentials updated from secret provider")
+		})
 		return nil
 	}
 
@@ -265,10 +234,6 @@ func (ba *basicAuthClient) Shutdown(_ context.Context) error {
 	}
 	if ba.passwordResolver != nil {
 		errs = append(errs, ba.passwordResolver.Shutdown())
-	}
-	if ba.cancel != nil {
-		ba.cancel()
-		ba.wg.Wait()
 	}
 	return errors.Join(errs...)
 }
@@ -311,6 +276,10 @@ func (ba *basicAuthClient) refreshFromSecretProvider(ctx context.Context, sp sec
 	if err != nil {
 		return fmt.Errorf("get secret: %w", err)
 	}
+	return ba.parseAndStoreCredentials(raw, cfg)
+}
+
+func (ba *basicAuthClient) parseAndStoreCredentials(raw string, cfg *SecretProviderConfig) error {
 	var parsed map[string]any
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
 		return fmt.Errorf("parse secret as JSON: %w", err)
@@ -333,24 +302,6 @@ func (ba *basicAuthClient) refreshFromSecretProvider(ctx context.Context, sp sec
 	}
 	ba.creds.Store(&secretCredentials{username: u, password: p})
 	return nil
-}
-
-func (ba *basicAuthClient) clientRefreshLoop(ctx context.Context, sp secretprovider.SecretProvider, cfg *SecretProviderConfig) {
-	defer ba.wg.Done()
-	ticker := time.NewTicker(cfg.RefreshInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := ba.refreshFromSecretProvider(ctx, sp, cfg); err != nil {
-				ba.logger.Error("failed to refresh credentials from secret provider", zap.Error(err))
-				continue
-			}
-			ba.logger.Info("successfully refreshed credentials from secret provider")
-		}
-	}
 }
 
 func (ba *basicAuthClient) RoundTripper(base http.RoundTripper) (http.RoundTripper, error) {

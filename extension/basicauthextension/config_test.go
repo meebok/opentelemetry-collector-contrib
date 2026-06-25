@@ -6,7 +6,6 @@ package basicauthextension
 import (
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -55,10 +54,9 @@ func TestLoadConfig(t *testing.T) {
 			expected: &Config{
 				ClientAuth: &ClientAuthSettings{
 					SecretProvider: &SecretProviderConfig{
-						ID:              component.MustNewID("awssecretsmanagerprovider"),
-						UsernameKey:     "username",
-						PasswordKey:     "password",
-						RefreshInterval: 5 * time.Minute,
+						ID:          component.MustNewID("awssecretsmanagerprovider"),
+						UsernameKey: "username",
+						PasswordKey: "password",
 					},
 				},
 			},
@@ -68,8 +66,7 @@ func TestLoadConfig(t *testing.T) {
 			expected: &Config{
 				Htpasswd: &HtpasswdSettings{
 					SecretProvider: &SecretProviderConfig{
-						ID:              component.MustNewID("awssecretsmanagerprovider"),
-						RefreshInterval: 10 * time.Minute,
+						ID: component.MustNewID("awssecretsmanagerprovider"),
 					},
 				},
 			},
@@ -173,20 +170,6 @@ func TestValidate_SecretProviderMutualExclusion(t *testing.T) {
 				},
 			},
 			err: errSecretProviderMissingKeys,
-		},
-		{
-			name: "client_secret_provider_negative_interval",
-			cfg: &Config{
-				ClientAuth: &ClientAuthSettings{
-					SecretProvider: &SecretProviderConfig{
-						ID:              component.MustNewID("provider"),
-						UsernameKey:     "u",
-						PasswordKey:     "p",
-						RefreshInterval: -1 * time.Second,
-					},
-				},
-			},
-			err: errSecretProviderNegativeInterval,
 		},
 		{
 			name: "server_secret_provider_missing_id",
