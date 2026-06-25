@@ -1,0 +1,8 @@
+services:
+  localstack:
+    image: localstack/localstack:3.0
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=secretsmanager
+      - DEFAULT_REGION=us-east-1

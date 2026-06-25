@@ -1,0 +1,32 @@
+extensions:
+  awssecretsmanagerprovider/client:
+    secret_arn: "${CLIENT_SECRET_ARN}"
+    region: us-east-1
+    refresh_interval: 10s
+
+  basicauth/client:
+    client_auth:
+      username: "admin"
+      secret_provider:
+        id: awssecretsmanagerprovider/client
+        username_key: user
+        password_key: pass
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4319
+
+exporters:
+  otlphttp:
+    endpoint: http://localhost:4318
+    auth:
+      authenticator: basicauth/client
+
+service:
+  extensions: [awssecretsmanagerprovider/client, basicauth/client]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [otlphttp]

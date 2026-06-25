@@ -1,0 +1,40 @@
+extensions:
+  awssecretsmanagerprovider/server:
+    secret_arn: "${SERVER_SECRET_ARN}"
+    region: us-east-1
+    refresh_interval: 10s
+
+  basicauth/server:
+    htpasswd:
+      secret_provider:
+        id: awssecretsmanagerprovider/server
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+        auth:
+          authenticator: basicauth/server
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      level: normal
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  extensions: [awssecretsmanagerprovider/server, basicauth/server]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
